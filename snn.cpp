@@ -98,7 +98,6 @@ private:
 
         std::vector<FLOAT> temp(n);
         const int max_iter = 100;
-        const FLOAT tol = 1e-6f;
         FLOAT norm_prev = 0.0f;
 
         for (int iter = 0; iter < max_iter; iter++) {
@@ -270,7 +269,6 @@ private:
 
         std::vector<DOUBLE> temp(n);
         const int max_iter = 100;
-        const DOUBLE tol = 1e-10; // Adjusted tolerance for double precision
         DOUBLE norm_prev = 0.0;
 
         for (int iter = 0; iter < max_iter; iter++) {
