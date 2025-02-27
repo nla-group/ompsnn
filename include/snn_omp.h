@@ -39,7 +39,7 @@ SOFTWARE.
 typedef float FLOAT;
 typedef double DOUBLE;
 
-#define __DEBUG__
+// #define __DEBUG__
 
 #if defined(__DEBUG__)
 template <class T>
@@ -53,7 +53,7 @@ void print_data(std::vector<T>& data, int n, int d) {
 }
 #endif
 
-class SNN_FLOAT {
+class SNN_FLOAT_OMP {
 private:
     int n; // Number of samples
     int d; // Number of features
@@ -75,7 +75,7 @@ public:
     std::vector<FLOAT> mean;
     std::vector<FLOAT> first_pc;
 
-    SNN_FLOAT(FLOAT* input_data, int num_samples, int num_features)
+    SNN_FLOAT_OMP(FLOAT* input_data, int num_samples, int num_features)
         : n(num_samples), d(num_features), data(n * d), mean(d), first_pc(d),
           sorted_proj_idx(n) {
         memcpy(data.data(), input_data, n * d * sizeof(FLOAT));

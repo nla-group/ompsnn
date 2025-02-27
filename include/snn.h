@@ -38,19 +38,6 @@ SOFTWARE.
 typedef float FLOAT;
 typedef double DOUBLE; 
 
-#define __DEBUG__
-
-#if defined(__DEBUG__)
-template <class T>
-void print_data(std::vector<T>& data, int n, int d) {
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < d; j++) {
-            std::cout << std::setw(3) << std::setprecision(3) << data[i * d + j] << "   ";
-        }
-        std::cout << std::endl;
-    }
-}
-#endif
 
 class SNN_FLOAT {
 private:
