@@ -228,6 +228,183 @@ public:
     }
 };
 
+
+class SNN_DOUBLE_OMP {
+private:
+    int n; // Number of samples
+    int d; // Number of features
+    std::vector<DOUBLE> data; // Centered data (n x d, row-major)
+    std::vector<std::tuple<DOUBLE, int, DOUBLE>> sorted_proj_idx;
+
+    void compute_projections_and_norms(std::vector<DOUBLE>& projections) {
+        cblas_dgemv(CblasRowMajor, CblasNoTrans, n, d, 1.0, data.data(), d,
+                    first_pc.data(), 1, 0.0, projections.data(), 1);
+
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < n; i++) {
+            DOUBLE norm_sq = cblas_ddot(d, &data[i * d], 1, &data[i * d], 1);
+            sorted_proj_idx[i] = std::make_tuple(projections[i], i, norm_sq);
+        }
+    }
+
+public:
+    std::vector<DOUBLE> mean;
+    std::vector<DOUBLE> first_pc;
+
+    SNN_DOUBLE_OMP(DOUBLE* input_data, int num_samples, int num_features)
+        : n(num_samples), d(num_features), data(n * d), mean(d), first_pc(d),
+            sorted_proj_idx(n) {
+        memcpy(data.data(), input_data, n * d * sizeof(DOUBLE));
+        compute_first_pc();
+    }
+
+    const DOUBLE* get_first_pc() const { return first_pc.data(); }
+
+private:
+    void compute_first_pc() {
+        std::fill(mean.begin(), mean.end(), 0.0);
+
+        // Parallel mean computation with temp array
+        std::vector<DOUBLE> temp_mean(d, 0.0);
+        #pragma omp parallel for schedule(static)
+        for (int j = 0; j < d; j++) {
+            DOUBLE sum = 0.0;
+            for (int i = 0; i < n; i++) {
+                sum += data[i * d + j];
+            }
+            temp_mean[j] = sum / n;
+        }
+        for (int j = 0; j < d; j++) {
+            mean[j] = temp_mean[j];
+        }
+
+        // Parallel data centering
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < d; j++) {
+                data[i * d + j] -= mean[j];
+            }
+        }
+
+        // Sequential RNG for simplicity and accuracy
+        std::mt19937 gen(std::random_device{}());
+        std::uniform_real_distribution<DOUBLE> dis(-1.0, 1.0);
+        for (int i = 0; i < d; i++) {
+            first_pc[i] = dis(gen);
+        }
+
+        std::vector<DOUBLE> temp(n);
+        const int max_iter = 100;
+        const DOUBLE tol = 1e-6;
+
+        // Sequential power iteration for accuracy
+        for (int iter = 0; iter < max_iter; iter++) {
+            cblas_dgemv(CblasRowMajor, CblasNoTrans, n, d, 1.0, data.data(), d,
+                        first_pc.data(), 1, 0.0, temp.data(), 1);
+            cblas_dgemv(CblasRowMajor, CblasTrans, n, d, 1.0, data.data(), d,
+                        temp.data(), 1, 0.0, first_pc.data(), 1);
+
+            DOUBLE norm = cblas_dnrm2(d, first_pc.data(), 1);
+            if (norm < 1e-10) {
+                std::cerr << "Zero norm encountered\n";
+                break;
+            }
+            cblas_dscal(d, 1.0 / norm, first_pc.data(), 1);
+        }
+
+        std::vector<DOUBLE> projections(n);
+        compute_projections_and_norms(projections);
+
+        std::sort(sorted_proj_idx.begin(), sorted_proj_idx.end(),
+                    [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+    }
+
+public:
+    std::vector<int> query_radius(const DOUBLE* new_data, DOUBLE R) const {
+        DOUBLE R_sq = R * R;
+        std::vector<DOUBLE> centered(d);
+        #pragma omp parallel for if(d > 100) schedule(static)
+        for (int j = 0; j < d; j++) {
+            centered[j] = new_data[j] - mean[j];
+        }
+        DOUBLE q = cblas_ddot(d, first_pc.data(), 1, centered.data(), 1);
+        DOUBLE new_norm_sq = cblas_ddot(d, centered.data(), 1, centered.data(), 1);
+
+        std::vector<DOUBLE> dot_products(n);
+        cblas_dgemv(CblasRowMajor, CblasNoTrans, n, d, 1.0, data.data(), d,
+                    centered.data(), 1, 0.0, dot_products.data(), 1);
+
+        auto lower_it = std::lower_bound(sorted_proj_idx.begin(), sorted_proj_idx.end(),
+                                            q - R,
+                                            [](const auto& p, DOUBLE val) { return std::get<0>(p) < val; });
+        auto upper_it = std::upper_bound(sorted_proj_idx.begin(), sorted_proj_idx.end(),
+                                            q + R,
+                                            [](DOUBLE val, const auto& p) { return val < std::get<0>(p); });
+
+        std::vector<int> indices;
+        indices.reserve(upper_it - lower_it);
+        for (auto it = lower_it; it != upper_it; ++it) {
+            int idx = std::get<1>(*it);
+            DOUBLE dot_xy = dot_products[idx];
+            DOUBLE norm_sq = std::get<2>(*it);
+            DOUBLE dist_sq = norm_sq + new_norm_sq - 2.0 * dot_xy;
+            if (dist_sq <= R_sq) indices.push_back(idx);
+        }
+        return indices;
+    }
+
+    std::vector<std::vector<int>> query_radius_batch(const DOUBLE* new_data, int m, DOUBLE R) const {
+        DOUBLE R_sq = R * R;
+
+        std::vector<DOUBLE> centered(m * d);
+        #pragma omp parallel for collapse(2) num_threads(4) schedule(static)
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < d; j++) {
+                centered[i * d + j] = new_data[i * d + j] - mean[j];
+            }
+        }
+
+        std::vector<DOUBLE> q_values(m);
+        cblas_dgemv(CblasRowMajor, CblasNoTrans, m, d, 1.0, centered.data(), d,
+                    first_pc.data(), 1, 0.0, q_values.data(), 1);
+
+        std::vector<DOUBLE> new_norm_sq(m);
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < m; i++) {
+            new_norm_sq[i] = cblas_ddot(d, centered.data() + i * d, 1, centered.data() + i * d, 1);
+        }
+
+        std::vector<DOUBLE> dot_products(n * m);
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasTrans, n, m, d, 1.0,
+                    data.data(), d, centered.data(), d, 0.0, dot_products.data(), m);
+
+        std::vector<std::vector<int>> all_indices(m);
+        #pragma omp parallel for schedule(dynamic)
+        for (int j = 0; j < m; j++) {
+            DOUBLE q = q_values[j];
+            auto lower_it = std::lower_bound(sorted_proj_idx.begin(), sorted_proj_idx.end(),
+                                                q - R,
+                                                [](const auto& p, DOUBLE val) { return std::get<0>(p) < val; });
+            auto upper_it = std::upper_bound(sorted_proj_idx.begin(), sorted_proj_idx.end(),
+                                                q + R,
+                                                [](DOUBLE val, const auto& p) { return val < std::get<0>(p); });
+
+            std::vector<int>& indices = all_indices[j];
+            indices.reserve(upper_it - lower_it);
+
+            for (auto it = lower_it; it != upper_it; ++it) {
+                int idx = std::get<1>(*it);
+                DOUBLE norm_sq = std::get<2>(*it);
+                DOUBLE dot_xy = dot_products[idx * m + j];
+                DOUBLE dist_sq = norm_sq + new_norm_sq[j] - 2.0 * dot_xy;
+                if (dist_sq <= R_sq) indices.push_back(idx);
+            }
+        }
+        return all_indices;
+    }
+};
+
+
 #ifdef OPENBLAS
 extern "C" void openblas_set_num_threads(int);
 #endif
